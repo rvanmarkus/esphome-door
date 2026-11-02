@@ -1,0 +1,179 @@
+# Publieke importbron; privéwachtwoorden komen uit de lokale secrets.yaml.
+substitutions:
+  name: "bolt-lock"
+
+# Concept voor ESPHome 2026.10.1; eerst compileren en op locatie testen.
+esphome:
+  name: "${name}"
+  min_version: 2026.10.1
+  project:
+    name: woning.sloten
+    version: "0.2.0"
+
+esp8266:
+  board: sonoff_sv
+  restore_from_flash: true
+
+preferences:
+  flash_write_interval: 1min
+
+logger:
+  level: INFO
+
+api:
+  reboot_timeout: 0s
+  # Device Builder voegt bij adoptie de reeds door HA ingestelde key toe.
+  encryption:
+
+dashboard_import:
+  package_import_url: github://rvanmarkus/esphome-door/bolt-lock.yaml@codex/v0.2.0
+  import_full_config: false
+
+ota:
+  - platform: esphome
+    # Na HA-koppeling neemt de import automatisch dezelfde API-key over.
+    encryption:
+
+wifi:
+  reboot_timeout: 0s
+  ap:
+    ssid: "Bolt-Lock Fallback Hotspot"
+    password: !secret ap_password_bolt_lock
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 2
+  local: true
+  log: false
+  ota: false
+  auth:
+    type: digest
+    username: !secret web_username
+    password: !secret web_password_bolt_lock
+
+# GPIO12 hoog = vergrendelen, overeenkomstig de oorspronkelijke output-lock.
+# Spanningsloos ontgrendeld volgens eigenaar; controleer NO/NC-bedrading ter plaatse.
+switch:
+  - platform: gpio
+    pin: GPIO12
+    id: lock_relay_out
+    internal: true
+    restore_mode: ALWAYS_OFF
+  - platform: template
+    name: "Automatisch ontgrendelen"
+    id: schedule_enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    name: "Schema Zondag"
+    id: day_sun
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    name: "Schema Maandag"
+    id: day_mon
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Schema Dinsdag"
+    id: day_tue
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Schema Woensdag"
+    id: day_wed
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Schema Donderdag"
+    id: day_thu
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Schema Vrijdag"
+    id: day_fri
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    name: "Schema Zaterdag"
+    id: day_sat
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+lock:
+  - platform: template
+    name: "Door bolt lock"
+    id: bolt_lock
+    lambda: |-
+      return id(lock_relay_out).state ? LOCK_STATE_LOCKED : LOCK_STATE_UNLOCKED;
+    lock_action:
+      - switch.turn_on: lock_relay_out
+    unlock_action:
+      - switch.turn_off: lock_relay_out
+
+number:
+  - platform: template
+    name: "Schema uur"
+    id: schedule_hour
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 7
+    optimistic: true
+    restore_value: true
+    mode: box
+  - platform: template
+    name: "Schema minuut"
+    id: schedule_minute
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 30
+    optimistic: true
+    restore_value: true
+    mode: box
+
+# Geheugen voor dubbele tijdpassages op dezelfde kalenderdag (o.a. wintertijd).
+# Na herstart wordt dit geheugen gewist; er wordt nooit achteraf ingehaald.
+globals:
+  - id: last_schedule_date
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+time:
+  - platform: sntp
+    id: local_time
+    timezone: Europe/Amsterdam
+    servers:
+      - 0.nl.pool.ntp.org
+      - 1.nl.pool.ntp.org
+      - 2.nl.pool.ntp.org
+    on_time:
+      - seconds: 0
+        then:
+          - if:
+              condition:
+                lambda: |-
+                  const auto now = id(local_time).now();
+                  if (!now.is_valid() || !id(schedule_enabled).state) return false;
+                  if (now.hour != (int) id(schedule_hour).state ||
+                      now.minute != (int) id(schedule_minute).state) return false;
+                  const bool days[] = {false, id(day_sun).state, id(day_mon).state,
+                    id(day_tue).state, id(day_wed).state, id(day_thu).state,
+                    id(day_fri).state, id(day_sat).state};
+                  if (now.day_of_week < 1 || now.day_of_week > 7 ||
+                      !days[now.day_of_week]) return false;
+                  const int date = now.year * 10000 + now.month * 100 + now.day_of_month;
+                  if (id(last_schedule_date) == date) return false;
+                  id(last_schedule_date) = date;
+                  return true;
+              then:
+                - lock.unlock: bolt_lock
+
+binary_sensor:
+  - platform: template
+    name: "Klok geldig"
+    lambda: 'return id(local_time).now().is_valid();'

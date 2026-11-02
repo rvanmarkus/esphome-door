@@ -1,0 +1,96 @@
+# Publieke importbron; privéwachtwoorden komen uit de lokale secrets.yaml.
+substitutions:
+  name: "front-door"
+
+# Concept voor ESPHome 2026.10.1; eerst compileren en op locatie testen.
+esphome:
+  name: "${name}"
+  min_version: 2026.10.1
+  project:
+    name: woning.sloten
+    version: "0.2.0"
+
+esp8266:
+  board: sonoff_sv
+  restore_from_flash: true
+
+preferences:
+  flash_write_interval: 1min
+
+logger:
+  level: INFO
+
+api:
+  reboot_timeout: 0s
+  # Device Builder voegt bij adoptie de reeds door HA ingestelde key toe.
+  encryption:
+
+dashboard_import:
+  package_import_url: github://rvanmarkus/esphome-door/front-door.yaml@codex/v0.2.0
+  import_full_config: false
+
+ota:
+  - platform: esphome
+    # Na HA-koppeling neemt de import automatisch dezelfde API-key over.
+    encryption:
+
+wifi:
+  reboot_timeout: 0s
+  ap:
+    ssid: "Front-Door Fallback Hotspot"
+    password: !secret ap_password_front_door
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 2
+  local: true
+  log: false
+  ota: false
+  auth:
+    type: digest
+    username: !secret web_username
+    password: !secret web_password_front_door
+
+number:
+  - platform: template
+    name: "Ontgrendeltijd"
+    id: unlock_seconds
+    unit_of_measurement: s
+    min_value: 1
+    max_value: 25
+    step: 1
+    initial_value: 25
+    optimistic: true
+    restore_value: true
+    mode: box
+
+switch:
+  - platform: gpio
+    pin: GPIO12
+    id: lock_relay_out
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+# Een tweede ontgrendelopdracht tijdens een puls wordt genegeerd:
+# de maximale ingestelde duur wordt daardoor niet verlengd.
+script:
+  - id: unlock_pulse
+    mode: single
+    then:
+      - switch.turn_on: lock_relay_out
+      - delay: !lambda 'return (uint32_t) (id(unlock_seconds).state * 1000);'
+      - switch.turn_off: lock_relay_out
+
+lock:
+  - platform: template
+    name: "Door"
+    id: doorlock
+    lambda: |-
+      return id(lock_relay_out).state ? LOCK_STATE_UNLOCKED : LOCK_STATE_LOCKED;
+    lock_action:
+      - script.stop: unlock_pulse
+      - switch.turn_off: lock_relay_out
+    unlock_action:
+      - script.execute: unlock_pulse
